@@ -193,6 +193,8 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
 
   -- The Lua VM is limited by how far it can jump in a loop; if this limit is
   -- exceeded, you get a "control structure too long" error. Mitigate this.
+  -- Also, calculate the total inner weight of this loop, excluding the contents
+  -- of nested loops (used for break-checking).
   local loop_weights = {}
   local function calc_loop_weights(token_i)
     if loop_weights[token_i] then
@@ -200,19 +202,24 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
     end
 
     local weights = {
-      total = tokens[token_i].end_token_i - token_i,
+      inner_non_loop = tokens[token_i].end_token_i - token_i,
       outlined = 0,
-      was_outlined = false,
+      should_outline = false,
     }
     for _, inner_token_i in ipairs(contained_loops[token_i]) do
       calc_loop_weights(inner_token_i)
-      weights.outlined = weights.outlined + loop_weights[inner_token_i].outlined
+      local inner_weights = loop_weights[inner_token_i]
+      weights.inner_non_loop = weights.inner_non_loop
+        - (tokens[inner_token_i].end_token_i - inner_token_i)
+      weights.outlined = weights.outlined + inner_weights.outlined
     end
 
-    local inline_weight = weights.total - weights.outlined
+    local inline_weight = tokens[token_i].end_token_i
+      - token_i
+      - weights.outlined
     if inline_weight > 1000 then
       weights.outlined = weights.outlined + inline_weight - 10
-      weights.was_outlined = true
+      weights.should_outline = true
     end
     loop_weights[token_i] = weights
   end
@@ -280,7 +287,7 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
       lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
       lines[#lines + 1] = [[api.nvim_out_write "\n"]]
     elseif token.type == TOKEN_LOOP_BEGIN then
-      if loop_weights[token_i].was_outlined then
+      if loop_weights[token_i].should_outline then
         lines[#lines + 1] = "local function f" .. token_i .. "()"
       else
         lines[#lines + 1] = "while memory[i] ~= 0 do"
@@ -288,9 +295,11 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
     elseif token.type == TOKEN_LOOP_END then
       if breakcheck_interval > 0 then
         -- Break-checking on possible backward braches is good enough.
-        lines[#lines + 1] = "bc(" .. token_i - token.begin_token_i .. ")"
+        lines[#lines + 1] = "bc("
+          .. loop_weights[tokens[token_i].begin_token_i].inner_non_loop
+          .. ")"
       end
-      if loop_weights[token.begin_token_i].was_outlined then
+      if loop_weights[token.begin_token_i].should_outline then
         lines[#lines + 1] = "end"
         lines[#lines + 1] = "while memory[i] ~= 0 do"
         lines[#lines + 1] = "f" .. token.begin_token_i .. "()"
