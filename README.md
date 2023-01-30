@@ -25,15 +25,13 @@ Examples:
 :BrainfuckSource file.bf memory_size=100
 
 " Source file.bf and compile it into a Lua program.
-" Compiled programs may only be interrupted when waiting for user input.
-"
 " Compiled programs generally run a lot faster than interpreted programs,
 " especially if your Neovim is built with LuaJIT support.
 :BrainfuckSource file.bf compile=true
 ```
 
-Interpreted Brainfuck programs can also be interrupted at any time by pressing
-`<C-c>`.
+Brainfuck programs can also be interrupted at any time by pressing `<C-c>`.
+In compiled programs, interrupts are only checked for at the end of loops.
 
 ## Where can I find some Brainfuck programs?
 

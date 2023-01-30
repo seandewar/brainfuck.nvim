@@ -128,7 +128,7 @@ end
 
 function M.interpret(tokens, memory_size, breakcheck_interval)
   memory_size = memory_size or 30000
-  breakcheck_interval = breakcheck_interval or 500000
+  breakcheck_interval = breakcheck_interval or 1000000
   vim.validate {
     { tokens, "t" },
     { memory_size, "n" },
@@ -181,12 +181,14 @@ function M.interpret(tokens, memory_size, breakcheck_interval)
   api.nvim_out_write "\n"
 end
 
-function M.transpile(tokens, contained_loops, memory_size)
+function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
   memory_size = memory_size or 30000
+  breakcheck_interval = breakcheck_interval or 500000
   vim.validate {
     { tokens, "t" },
     { contained_loops, "t" },
     { memory_size, "n" },
+    { breakcheck_interval, "n" },
   }
 
   -- The Lua VM is limited by how far it can jump in a loop; if this limit is
@@ -226,6 +228,20 @@ function M.transpile(tokens, contained_loops, memory_size)
     "end",
     "local i = 1",
   }
+
+  if breakcheck_interval > 0 then
+    vim.list_extend(lines, {
+      "local bc_counter = " .. breakcheck_interval,
+      "local function bc(elapsed)",
+      "bc_counter = bc_counter - elapsed",
+      "if bc_counter > 0 then",
+      "return",
+      "end",
+      'api.nvim_call_function("getchar", {1})',
+      "bc_counter = (bc_counter - 1) % " .. breakcheck_interval .. " + 1",
+      "end",
+    })
+  end
 
   for token_i, token in ipairs(tokens) do
     if token.type == TOKEN_CURSOR_MOVE then
@@ -270,6 +286,10 @@ function M.transpile(tokens, contained_loops, memory_size)
         lines[#lines + 1] = "while memory[i] ~= 0 do"
       end
     elseif token.type == TOKEN_LOOP_END then
+      if breakcheck_interval > 0 then
+        -- Break-checking on possible backward braches is good enough.
+        lines[#lines + 1] = "bc(" .. token_i - token.begin_token_i .. ")"
+      end
       if loop_weights[token.begin_token_i].was_outlined then
         lines[#lines + 1] = "end"
         lines[#lines + 1] = "while memory[i] ~= 0 do"
