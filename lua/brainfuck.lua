@@ -13,23 +13,24 @@ local OP_GETC = (","):byte()
 local OP_LOOP_BEGIN = ("["):byte()
 local OP_LOOP_END = ("]"):byte()
 
-local NON_LOOP_OPS = {
-  [OP_RIGHT] = true,
-  [OP_LEFT] = true,
-  [OP_INCR] = true,
-  [OP_DECR] = true,
-  [OP_PUTC] = true,
-  [OP_GETC] = true,
-}
-local LOOP_OPS = {
-  [OP_LOOP_BEGIN] = true,
-  [OP_LOOP_END] = true,
+local TOKEN_CURSOR_MOVE = 1
+local TOKEN_CURSOR_WRITE = 2
+local TOKEN_PUTC = 3
+local TOKEN_GETC = 4
+local TOKEN_LOOP_BEGIN = 5
+local TOKEN_LOOP_END = 6
+
+local MERGEABLE_OPS = {
+  [OP_RIGHT] = { token_type = TOKEN_CURSOR_MOVE, count = 1 },
+  [OP_LEFT] = { token_type = TOKEN_CURSOR_MOVE, count = -1 },
+  [OP_INCR] = { token_type = TOKEN_CURSOR_WRITE, count = 1 },
+  [OP_DECR] = { token_type = TOKEN_CURSOR_WRITE, count = -1 },
+  [OP_PUTC] = { token_type = TOKEN_PUTC, count = 1 },
+  [OP_GETC] = { token_type = TOKEN_GETC, count = 1 },
 }
 
 function M.parse(lines)
-  vim.validate {
-    { lines, { "f", "s", "t" } },
-  }
+  vim.validate { { lines, { "f", "s", "t" } } }
 
   local line_iter
   if type(lines) == "function" then
@@ -48,26 +49,32 @@ function M.parse(lines)
 
   local tokens = {}
   local unresolved_loops = {}
-  local pending_token
+  local pending_token = { type = TOKEN_CURSOR_MOVE, count = 0 }
   local line_nr = 1
 
   for line in line_iter do
     for col_nr = 1, #line do
       local op = line:byte(col_nr)
+      local mergeable = MERGEABLE_OPS[op]
 
-      if NON_LOOP_OPS[op] then
-        if pending_token and pending_token.op == op then
-          pending_token.count = pending_token.count + 1
+      if mergeable then
+        if pending_token.type == mergeable.token_type then
+          pending_token.count = pending_token.count + mergeable.count
         else
-          tokens[#tokens + 1] = pending_token
-          pending_token = { op = op, count = 1 }
+          if pending_token.count ~= 0 then
+            tokens[#tokens + 1] = pending_token
+          end
+          pending_token = {
+            type = mergeable.token_type,
+            count = mergeable.count,
+          }
         end
-      elseif LOOP_OPS[op] then
+      elseif op == OP_LOOP_BEGIN or op == OP_LOOP_END then
         tokens[#tokens + 1] = pending_token
-        pending_token = nil
+        pending_token = { type = TOKEN_CURSOR_MOVE, count = 0 }
 
         if op == OP_LOOP_BEGIN then
-          tokens[#tokens + 1] = { op = op, end_token_i = nil }
+          tokens[#tokens + 1] = { type = TOKEN_LOOP_BEGIN, end_token_i = nil }
           unresolved_loops[#unresolved_loops + 1] = {
             token_i = #tokens,
             line_nr = line_nr,
@@ -85,7 +92,7 @@ function M.parse(lines)
 
           local begin_token_i = unresolved_loops[#unresolved_loops].token_i
           tokens[#tokens + 1] = {
-            op = op,
+            type = TOKEN_LOOP_END,
             begin_token_i = begin_token_i,
           }
           tokens[begin_token_i].end_token_i = #tokens
@@ -106,7 +113,9 @@ function M.parse(lines)
       )
     )
   end
-  tokens[#tokens + 1] = pending_token
+  if pending_token.count ~= 0 then
+    tokens[#tokens + 1] = pending_token
+  end
   return tokens
 end
 
@@ -130,30 +139,25 @@ function M.interpret(tokens, memory_size, breakcheck_interval)
 
   while token_i <= #tokens do
     local token = tokens[token_i]
-    local op = token.op
 
-    if op == OP_RIGHT then
+    if token.type == TOKEN_CURSOR_MOVE then
       memory_i = ((memory_i + token.count - 1) % #memory) + 1
-    elseif op == OP_LEFT then
-      memory_i = ((memory_i - token.count - 1) % #memory) + 1
-    elseif op == OP_INCR then
+    elseif token.type == TOKEN_CURSOR_WRITE then
       memory[memory_i] = (memory[memory_i] + token.count) % 256
-    elseif op == OP_DECR then
-      memory[memory_i] = (memory[memory_i] - token.count) % 256
-    elseif op == OP_PUTC then
+    elseif token.type == TOKEN_PUTC then
       api.nvim_out_write(string.char(memory[memory_i]):rep(token.count))
-    elseif op == OP_GETC then
+    elseif token.type == TOKEN_GETC then
       for _ = 1, token.count do
         api.nvim_out_write "\n>\n"
         memory[memory_i] = fn.getchar() % 256
         api.nvim_out_write(string.char(memory[memory_i]))
       end
       api.nvim_out_write "\n"
-    elseif op == OP_LOOP_BEGIN then
+    elseif token.type == TOKEN_LOOP_BEGIN then
       if memory[memory_i] == 0 then
         token_i = token.end_token_i
       end
-    elseif op == OP_LOOP_END then
+    elseif token.type == TOKEN_LOOP_END then
       if memory[memory_i] ~= 0 then
         token_i = token.begin_token_i
       end
@@ -188,40 +192,44 @@ function M.transpile(tokens, memory_size)
   }
 
   for _, token in ipairs(tokens) do
-    local op = token.op
-
-    if op == OP_RIGHT then
-      lines[#lines + 1] = ("memory_i = ((memory_i + %d) %% %d) + 1"):format(
-        token.count - 1,
-        memory_size
-      )
-    elseif op == OP_LEFT then
-      lines[#lines + 1] = ("memory_i = ((memory_i - %d) %% %d) + 1"):format(
-        token.count + 1,
-        memory_size
-      )
-    elseif op == OP_INCR then
-      lines[#lines + 1] = "memory[memory_i] = (memory[memory_i] + "
-        .. token.count
-        .. ") % 256"
-    elseif op == OP_DECR then
-      lines[#lines + 1] = "memory[memory_i] = (memory[memory_i] - "
-        .. token.count
-        .. ") % 256"
-    elseif op == OP_PUTC then
-      lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]):rep("
-        .. token.count
-        .. "))"
-    elseif op == OP_GETC then
+    if token.type == TOKEN_CURSOR_MOVE then
+      local offset = token.count - 1
+      if offset ~= 0 then
+        lines[#lines + 1] = ("memory_i = ((memory_i %s %d) %% %d) + 1"):format(
+          offset > 0 and "+" or "-",
+          math.abs(offset),
+          memory_size
+        )
+      else
+        lines[#lines + 1] = ("memory_i = (memory_i %% %d) + 1"):format(
+          memory_size
+        )
+      end
+    elseif token.type == TOKEN_CURSOR_WRITE then
+      lines[#lines + 1] =
+        (
+          "memory[memory_i] = (memory[memory_i] %s %d) %% 256"
+        ):format(token.count > 0 and "+" or "-", math.abs(token.count))
+    elseif token.type == TOKEN_PUTC then
+      if token.count == 1 then
+        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]))"
+      else
+        lines[#lines + 1] = (
+          "api.nvim_out_write(string.char(memory[memory_i]):rep("
+          .. token.count
+          .. "))"
+        )
+      end
+    elseif token.type == TOKEN_GETC then
       for _ = 1, token.count do
         lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
         lines[#lines + 1] = "memory[memory_i] = fn.getchar() % 256"
         lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]))"
       end
       lines[#lines + 1] = [[api.nvim_out_write "\n"]]
-    elseif op == OP_LOOP_BEGIN then
+    elseif token.type == TOKEN_LOOP_BEGIN then
       lines[#lines + 1] = "while memory[memory_i] ~= 0 do"
-    elseif op == OP_LOOP_END then
+    elseif token.type == TOKEN_LOOP_END then
       lines[#lines + 1] = "end"
     end
   end
@@ -284,7 +292,7 @@ function M.source(lines, opts)
       )
     end
 
-    step(info.program, "Execution (Lua)")
+    step(info.program, "Execution (compiled)")
   else
     step(function()
       M.interpret(tokens, opts.memory_size)
