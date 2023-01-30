@@ -20,13 +20,13 @@ local TOKEN_GETC = 4
 local TOKEN_LOOP_BEGIN = 5
 local TOKEN_LOOP_END = 6
 
-local MERGEABLE_OPS = {
-  [OP_RIGHT] = { token_type = TOKEN_CURSOR_MOVE, count = 1 },
-  [OP_LEFT] = { token_type = TOKEN_CURSOR_MOVE, count = -1 },
-  [OP_INCR] = { token_type = TOKEN_CURSOR_WRITE, count = 1 },
-  [OP_DECR] = { token_type = TOKEN_CURSOR_WRITE, count = -1 },
-  [OP_PUTC] = { token_type = TOKEN_PUTC, count = 1 },
-  [OP_GETC] = { token_type = TOKEN_GETC, count = 1 },
+local MERGEABLE_OP_TOKEN = {
+  [OP_RIGHT] = { type = TOKEN_CURSOR_MOVE, count = 1 },
+  [OP_LEFT] = { type = TOKEN_CURSOR_MOVE, count = -1 },
+  [OP_INCR] = { type = TOKEN_CURSOR_WRITE, count = 1 },
+  [OP_DECR] = { type = TOKEN_CURSOR_WRITE, count = -1 },
+  [OP_PUTC] = { type = TOKEN_PUTC, count = 1 },
+  [OP_GETC] = { type = TOKEN_GETC, count = 1 },
 }
 
 function M.parse(lines)
@@ -48,6 +48,7 @@ function M.parse(lines)
   end
 
   local tokens = {}
+  local contained_loops = {}
   local unresolved_loops = {}
   local pending_token = { type = TOKEN_CURSOR_MOVE, count = 0 }
   local line_nr = 1
@@ -55,18 +56,18 @@ function M.parse(lines)
   for line in line_iter do
     for col_nr = 1, #line do
       local op = line:byte(col_nr)
-      local mergeable = MERGEABLE_OPS[op]
+      local mergeable_token = MERGEABLE_OP_TOKEN[op]
 
-      if mergeable then
-        if pending_token.type == mergeable.token_type then
-          pending_token.count = pending_token.count + mergeable.count
+      if mergeable_token then
+        if pending_token.type == mergeable_token.type then
+          pending_token.count = pending_token.count + mergeable_token.count
         else
           if pending_token.count ~= 0 then
             tokens[#tokens + 1] = pending_token
           end
           pending_token = {
-            type = mergeable.token_type,
-            count = mergeable.count,
+            type = mergeable_token.type,
+            count = mergeable_token.count,
           }
         end
       elseif op == OP_LOOP_BEGIN or op == OP_LOOP_END then
@@ -75,11 +76,17 @@ function M.parse(lines)
 
         if op == OP_LOOP_BEGIN then
           tokens[#tokens + 1] = { type = TOKEN_LOOP_BEGIN, end_token_i = nil }
+          local parent_loop = unresolved_loops[#unresolved_loops]
+          if parent_loop then
+            local contained = contained_loops[parent_loop.token_i]
+            contained[#contained + 1] = #tokens
+          end
           unresolved_loops[#unresolved_loops + 1] = {
             token_i = #tokens,
             line_nr = line_nr,
             col_nr = col_nr,
           }
+          contained_loops[#tokens] = {}
         else -- op == OP_LOOP_END
           if #unresolved_loops == 0 then
             error(
@@ -116,7 +123,7 @@ function M.parse(lines)
   if pending_token.count ~= 0 then
     tokens[#tokens + 1] = pending_token
   end
-  return tokens
+  return tokens, contained_loops
 end
 
 function M.interpret(tokens, memory_size, breakcheck_interval)
@@ -174,16 +181,45 @@ function M.interpret(tokens, memory_size, breakcheck_interval)
   api.nvim_out_write "\n"
 end
 
-function M.transpile(tokens, memory_size)
+function M.transpile(tokens, contained_loops, memory_size)
   memory_size = memory_size or 30000
   vim.validate {
     { tokens, "t" },
+    { contained_loops, "t" },
     { memory_size, "n" },
   }
 
+  -- The Lua VM is limited by how far it can jump in a loop; if this limit is
+  -- exceeded, you get a "control structure too long" error. Mitigate this.
+  local loop_weights = {}
+  local function calc_loop_weights(token_i)
+    if loop_weights[token_i] then
+      return
+    end
+
+    local weights = {
+      total = tokens[token_i].end_token_i - token_i,
+      outlined = 0,
+      was_outlined = false,
+    }
+    for _, inner_token_i in ipairs(contained_loops[token_i]) do
+      calc_loop_weights(inner_token_i)
+      weights.outlined = weights.outlined + loop_weights[inner_token_i].outlined
+    end
+
+    local inline_weight = weights.total - weights.outlined
+    if inline_weight > 1000 then
+      weights.outlined = weights.outlined + inline_weight - 10
+      weights.was_outlined = true
+    end
+    loop_weights[token_i] = weights
+  end
+  for token_i, _ in pairs(contained_loops) do
+    calc_loop_weights(token_i)
+  end
+
   local lines = {
     "local api = vim.api",
-    "local fn = vim.fn",
     "local memory = {}",
     "for i = 1, " .. memory_size .. " do",
     "memory[i] = 0",
@@ -191,7 +227,7 @@ function M.transpile(tokens, memory_size)
     "local i = 1",
   }
 
-  for _, token in ipairs(tokens) do
+  for token_i, token in ipairs(tokens) do
     if token.type == TOKEN_CURSOR_MOVE then
       local offset = token.count - 1
       if offset ~= 0 then
@@ -220,15 +256,25 @@ function M.transpile(tokens, memory_size)
       for _ = 1, token.count - 1 do
         lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
         lines[#lines + 1] =
-          "api.nvim_out_write(string.char(fn.getchar() % 256))"
+          'api.nvim_out_write(string.char(api.nvim_call_function("getchar", {}) % 256))'
       end
       lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
-      lines[#lines + 1] = "memory[i] = fn.getchar() % 256"
+      lines[#lines + 1] =
+        'memory[i] = api.nvim_call_function("getchar", {}) % 256'
       lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
       lines[#lines + 1] = [[api.nvim_out_write "\n"]]
     elseif token.type == TOKEN_LOOP_BEGIN then
-      lines[#lines + 1] = "while memory[i] ~= 0 do"
+      if loop_weights[token_i].was_outlined then
+        lines[#lines + 1] = "local function f" .. token_i .. "()"
+      else
+        lines[#lines + 1] = "while memory[i] ~= 0 do"
+      end
     elseif token.type == TOKEN_LOOP_END then
+      if loop_weights[token.begin_token_i].was_outlined then
+        lines[#lines + 1] = "end"
+        lines[#lines + 1] = "while memory[i] ~= 0 do"
+        lines[#lines + 1] = "f" .. token.begin_token_i .. "()"
+      end
       lines[#lines + 1] = "end"
     end
   end
@@ -267,14 +313,19 @@ function M.source(lines, opts)
     end
   end
 
-  local tokens = step(function()
-    return M.parse(lines)
+  local parsed = step(function()
+    local tokens, contained_loops = M.parse(lines)
+    return { tokens = tokens, contained_loops = contained_loops }
   end, "Parsing")
 
   if opts.compile then
     local string = table.concat(
       step(function()
-        return M.transpile(tokens, opts.memory_size)
+        return M.transpile(
+          parsed.tokens,
+          parsed.contained_loops,
+          opts.memory_size
+        )
       end, "Transpile to Lua"),
       "\n"
     )
@@ -294,7 +345,7 @@ function M.source(lines, opts)
     step(info.program, "Execution (compiled)")
   else
     step(function()
-      M.interpret(tokens, opts.memory_size)
+      M.interpret(parsed.tokens, opts.memory_size)
     end, "Execution (interpreted)")
   end
 end

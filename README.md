@@ -24,7 +24,7 @@ Examples:
 " Default is 30KB. The VM's cursor wraps around if it goes out-of-bounds.
 :BrainfuckSource file.bf memory_size=100
 
-" Source file.bf and transpile it to Lua, then loadstring() it.
+" Source file.bf and compile it into a Lua program.
 " Compiled programs may only be interrupted when waiting for user input.
 "
 " Compiled programs generally run a lot faster than interpreted programs,
