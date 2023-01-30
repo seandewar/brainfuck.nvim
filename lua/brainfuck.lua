@@ -73,7 +73,7 @@ function M.parse(lines)
             line_nr = line_nr,
             col_nr = col_nr,
           }
-        else -- op == OP_LOOPEND
+        else -- op == OP_LOOP_END
           if #unresolved_loops == 0 then
             error(
               ("parse error: unmatched ']' at line %d, col %d"):format(
@@ -170,12 +170,74 @@ function M.interpret(tokens, memory_size, breakcheck_interval)
   api.nvim_out_write "\n"
 end
 
+function M.transpile(tokens, memory_size)
+  memory_size = memory_size or 30000
+  vim.validate {
+    { tokens, "t" },
+    { memory_size, "n" },
+  }
+
+  local lines = {
+    "local api = vim.api",
+    "local fn = vim.fn",
+    "local memory = {}",
+    "for i = 1, " .. memory_size .. " do",
+    "memory[i] = 0",
+    "end",
+    "local memory_i = 1",
+  }
+
+  for _, token in ipairs(tokens) do
+    local op = token.op
+
+    if op == OP_RIGHT then
+      lines[#lines + 1] = ("memory_i = ((memory_i + %d) %% %d) + 1"):format(
+        token.count - 1,
+        memory_size
+      )
+    elseif op == OP_LEFT then
+      lines[#lines + 1] = ("memory_i = ((memory_i - %d) %% %d) + 1"):format(
+        token.count + 1,
+        memory_size
+      )
+    elseif op == OP_INCR then
+      lines[#lines + 1] = "memory[memory_i] = (memory[memory_i] + "
+        .. token.count
+        .. ") % 256"
+    elseif op == OP_DECR then
+      lines[#lines + 1] = "memory[memory_i] = (memory[memory_i] - "
+        .. token.count
+        .. ") % 256"
+    elseif op == OP_PUTC then
+      lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]):rep("
+        .. token.count
+        .. "))"
+    elseif op == OP_GETC then
+      for _ = 1, token.count do
+        lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
+        lines[#lines + 1] = "memory[memory_i] = fn.getchar() % 256"
+        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]))"
+      end
+      lines[#lines + 1] = [[api.nvim_out_write "\n"]]
+    elseif op == OP_LOOP_BEGIN then
+      lines[#lines + 1] = "while memory[memory_i] ~= 0 do"
+    elseif op == OP_LOOP_END then
+      lines[#lines + 1] = "end"
+    end
+  end
+
+  lines[#lines + 1] = [[api.nvim_out_write "\n"]]
+  return lines
+end
+
 function M.source(lines, opts)
   opts = vim.tbl_extend("keep", opts or {}, {
     profile = false,
+    compile = false,
   })
   vim.validate {
     { opts.profile, "b" },
+    { opts.compile, "b" },
   }
 
   local step
@@ -202,9 +264,32 @@ function M.source(lines, opts)
     return M.parse(lines)
   end, "Parsing")
 
-  step(function()
-    M.interpret(tokens, opts.memory_size)
-  end, "Execution (interpreted)")
+  if opts.compile then
+    local string = table.concat(
+      step(function()
+        return M.transpile(tokens, opts.memory_size)
+      end, "Transpile to Lua"),
+      "\n"
+    )
+
+    local info = step(function()
+      local program, err = loadstring(string, "transpiled brainfuck program")
+      return { program = program, err = err }
+    end, "Lua loadstring()")
+    if not info.program then
+      error(
+        "Lua loadstring() of transpiled program failed!"
+          .. " This is a brainfuck.nvim bug. Details: "
+          .. info.err
+      )
+    end
+
+    step(info.program, "Execution (Lua)")
+  else
+    step(function()
+      M.interpret(tokens, opts.memory_size)
+    end, "Execution (interpreted)")
+  end
 end
 
 return M

@@ -20,12 +20,20 @@ Examples:
 " Source file.bf and also show timing information.
 :BrainfuckSource! file.bf
 
-" Source file.bf and set the memory available to the interpreter to 100 bytes.
-" Default is 30,000 bytes. The cursor wraps around if it goes out-of-bounds.
+" Source file.bf and set the memory available to the VM to 100 bytes.
+" Default is 30KB. The VM's cursor wraps around if it goes out-of-bounds.
 :BrainfuckSource file.bf memory_size=100
+
+" Source file.bf and transpile it to Lua, then loadstring() it.
+" Compiled programs may only be interrupted when waiting for user input.
+"
+" Compiled programs generally run a lot faster than interpreted programs,
+" especially if your Neovim is built with LuaJIT support.
+:BrainfuckSource file.bf compile=true
 ```
 
-Brainfuck programs can also be interrupted by pressing `<C-c>`.
+Interpreted Brainfuck programs can also be interrupted at any time by pressing
+`<C-c>`.
 
 ## Where can I find some Brainfuck programs?
 

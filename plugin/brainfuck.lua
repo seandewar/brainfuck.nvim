@@ -24,6 +24,17 @@ api.nvim_create_user_command("BrainfuckSource", function(info)
       if not opts.memory_size then
         error 'Option "memory_size" needs a number value'
       end
+    elseif option == "compile" then
+      opts.compile = nil
+      if value == "true" then
+        opts.compile = true
+      elseif value == "false" then
+        opts.compile = false
+      end
+
+      if opts.compile == nil then
+        error 'Option "compile" needs a boolean value'
+      end
     else
       error('Unknown option: "' .. option .. '"')
     end
