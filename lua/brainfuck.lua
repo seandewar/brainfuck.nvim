@@ -188,47 +188,46 @@ function M.transpile(tokens, memory_size)
     "for i = 1, " .. memory_size .. " do",
     "memory[i] = 0",
     "end",
-    "local memory_i = 1",
+    "local i = 1",
   }
 
   for _, token in ipairs(tokens) do
     if token.type == TOKEN_CURSOR_MOVE then
       local offset = token.count - 1
       if offset ~= 0 then
-        lines[#lines + 1] = ("memory_i = ((memory_i %s %d) %% %d) + 1"):format(
+        lines[#lines + 1] = ("i = (i %s %d) %% %d + 1"):format(
           offset > 0 and "+" or "-",
           math.abs(offset),
           memory_size
         )
       else
-        lines[#lines + 1] = ("memory_i = (memory_i %% %d) + 1"):format(
-          memory_size
-        )
+        lines[#lines + 1] = ("i = i %% %d + 1"):format(memory_size)
       end
     elseif token.type == TOKEN_CURSOR_WRITE then
-      lines[#lines + 1] =
-        (
-          "memory[memory_i] = (memory[memory_i] %s %d) %% 256"
-        ):format(token.count > 0 and "+" or "-", math.abs(token.count))
+      lines[#lines + 1] = ("memory[i] = (memory[i] %s %d) %% 256"):format(
+        token.count > 0 and "+" or "-",
+        math.abs(token.count)
+      )
     elseif token.type == TOKEN_PUTC then
       if token.count == 1 then
-        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]))"
+        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
       else
         lines[#lines + 1] = (
-          "api.nvim_out_write(string.char(memory[memory_i]):rep("
-          .. token.count
-          .. "))"
-        )
+          "api.nvim_out_write(string.char(memory[i]):rep(%d))"
+        ):format(token.count)
       end
     elseif token.type == TOKEN_GETC then
-      for _ = 1, token.count do
+      for _ = 1, token.count - 1 do
         lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
-        lines[#lines + 1] = "memory[memory_i] = fn.getchar() % 256"
-        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[memory_i]))"
+        lines[#lines + 1] =
+          "api.nvim_out_write(string.char(fn.getchar() % 256))"
       end
+      lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
+      lines[#lines + 1] = "memory[i] = fn.getchar() % 256"
+      lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
       lines[#lines + 1] = [[api.nvim_out_write "\n"]]
     elseif token.type == TOKEN_LOOP_BEGIN then
-      lines[#lines + 1] = "while memory[memory_i] ~= 0 do"
+      lines[#lines + 1] = "while memory[i] ~= 0 do"
     elseif token.type == TOKEN_LOOP_END then
       lines[#lines + 1] = "end"
     end
