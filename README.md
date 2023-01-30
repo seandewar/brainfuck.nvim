@@ -14,7 +14,7 @@ Examples:
 " Source lines 1-3 from the current buffer.
 :1,3BrainfuckSource
 
-" Source file.bf (:source could be used instead).
+" Source file.bf (equivalent to `:source file.bf`).
 :BrainfuckSource file.bf
 
 " Source file.bf and also show timing information.
@@ -24,14 +24,16 @@ Examples:
 " Default is 30KB. The VM's cursor wraps around if it goes out-of-bounds.
 :BrainfuckSource file.bf memory_size=100
 
-" Source file.bf and compile it into a Lua program.
-" Compiled programs generally run a lot faster than interpreted programs,
-" especially if your Neovim is built with LuaJIT support.
-:BrainfuckSource file.bf compile=true
+" Source file.bf without compiling it, interpreting the code instead.
+" By default, sourced brainfuck programs are compiled to Lua programs, which
+" typically run faster than using the interpreter.
+:BrainfuckSource file.bf compile=false
+
+" Transpile file.bf to Lua without running it. Open the result in a new buffer.
+:BrainfuckSource file.bf compile=false transpile=true
 ```
 
-Brainfuck programs can also be interrupted at any time by pressing `<C-c>`.
-In compiled programs, interrupts are only checked for at the end of loops.
+Brainfuck programs can also be interrupted by pressing `<C-c>`.
 
 ## Where can I find some Brainfuck programs?
 

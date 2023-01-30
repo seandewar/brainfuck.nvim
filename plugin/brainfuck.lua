@@ -12,11 +12,19 @@ api.nvim_create_user_command("BrainfuckSource", function(info)
   local opts = { profile = info.bang }
   local file
 
+  local function toboolean(string)
+    if string == "true" then
+      return true
+    elseif string == "false" then
+      return false
+    end
+  end
+
   for _, arg in ipairs(info.fargs) do
     local option, value = arg:match "^(.*)=(.*)$"
     if not option then
       if file then
-        error "More than one file name specified"
+        error "More than one file name was specified"
       end
       file = arg
     elseif option == "memory_size" then
@@ -25,15 +33,14 @@ api.nvim_create_user_command("BrainfuckSource", function(info)
         error 'Option "memory_size" needs a number value'
       end
     elseif option == "compile" then
-      opts.compile = nil
-      if value == "true" then
-        opts.compile = true
-      elseif value == "false" then
-        opts.compile = false
-      end
-
+      opts.compile = toboolean(value)
       if opts.compile == nil then
         error 'Option "compile" needs a boolean value'
+      end
+    elseif option == "transpile" then
+      opts.transpile = toboolean(value)
+      if opts.transpile == nil then
+        error 'Option "transpile" needs a boolean value'
       end
     else
       error('Unknown option: "' .. option .. '"')

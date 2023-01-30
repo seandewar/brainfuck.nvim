@@ -315,11 +315,13 @@ end
 function M.source(lines, opts)
   opts = vim.tbl_extend("keep", opts or {}, {
     profile = false,
-    compile = false,
+    compile = true,
+    transpile = false,
   })
   vim.validate {
     { opts.profile, "b" },
     { opts.compile, "b" },
+    { opts.transpile, "b" },
   }
 
   local step
@@ -347,31 +349,38 @@ function M.source(lines, opts)
     return { tokens = tokens, contained_loops = contained_loops }
   end, "Parsing")
 
-  if opts.compile then
-    local string = table.concat(
-      step(function()
-        return M.transpile(
-          parsed.tokens,
-          parsed.contained_loops,
-          opts.memory_size
-        )
-      end, "Transpile to Lua"),
-      "\n"
-    )
-
-    local info = step(function()
-      local program, err = loadstring(string, "transpiled brainfuck program")
-      return { program = program, err = err }
-    end, "Lua loadstring()")
-    if not info.program then
-      error(
-        "Lua loadstring() of transpiled program failed!"
-          .. " This is a brainfuck.nvim bug. Details: "
-          .. info.err
+  if opts.compile or opts.transpile then
+    local transpiled = step(function()
+      return M.transpile(
+        parsed.tokens,
+        parsed.contained_loops,
+        opts.memory_size
       )
+    end, "Transpile to Lua")
+
+    if opts.transpile then
+      vim.cmd [[new +set\ filetype=lua]]
+      api.nvim_buf_set_lines(0, 0, -1, true, transpiled)
     end
 
-    step(info.program, "Execution (compiled)")
+    if opts.compile then
+      local info = step(function()
+        local program, err = loadstring(
+          table.concat(transpiled, "\n"),
+          "compiled brainfuck program"
+        )
+        return { program = program, err = err }
+      end, "Lua loadstring()")
+      if not info.program then
+        error(
+          "Lua loadstring() of transpiled program failed!"
+            .. " This is a brainfuck.nvim bug. Details: "
+            .. info.err
+        )
+      end
+
+      step(info.program, "Execution (compiled)")
+    end
   else
     step(function()
       M.interpret(parsed.tokens, opts.memory_size)
