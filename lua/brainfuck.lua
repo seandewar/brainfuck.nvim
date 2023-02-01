@@ -359,24 +359,24 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
   end
 
   local lines = {
-    "local api = vim.api",
-    "local memory = {}",
+    "local a = vim.api",
+    "local m = {}",
     "for i = 1, " .. memory_size .. " do",
-    "memory[i] = 0",
+    "m[i] = 0",
     "end",
     "local i = 1",
   }
 
   if breakcheck_interval > 0 then
     vim.list_extend(lines, {
-      "local bc_counter = " .. breakcheck_interval,
-      "local function bc(elapsed)",
-      "bc_counter = bc_counter - elapsed",
-      "if bc_counter > 0 then",
+      "local c = " .. breakcheck_interval,
+      "local function b(e)",
+      "c = c - e",
+      "if c > 0 then",
       "return",
       "end",
-      'api.nvim_call_function("getchar", {1})',
-      "bc_counter = (bc_counter - 1) % " .. breakcheck_interval .. " + 1",
+      'a.nvim_call_function("getchar", {1})',
+      "c = (c - 1) % " .. breakcheck_interval .. " + 1",
       "end",
     })
   end
@@ -394,52 +394,52 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
         lines[#lines + 1] = ("i = i %% %d + 1"):format(memory_size)
       end
     elseif token.type == TOKEN_CURSOR_WRITE then
-      lines[#lines + 1] = ("memory[i] = (memory[i] %s %d) %% 256"):format(
+      lines[#lines + 1] = ("m[i] = (m[i] %s %d) %% 256"):format(
         token.count > 0 and "+" or "-",
         math.abs(token.count)
       )
     elseif token.type == TOKEN_PUTC then
       if token.count == 1 then
-        lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
+        lines[#lines + 1] = "a.nvim_out_write(string.char(m[i]))"
       else
-        lines[#lines + 1] = (
-          "api.nvim_out_write(string.char(memory[i]):rep(%d))"
-        ):format(token.count)
+        lines[#lines + 1] =
+          ("a.nvim_out_write(string.char(m[i]):rep(%d))"):format(
+            token.count
+          )
       end
     elseif token.type == TOKEN_GETC then
       for _ = 1, token.count - 1 do
-        lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
+        lines[#lines + 1] = [[a.nvim_out_write "\n>\n"]]
         lines[#lines + 1] =
-          'api.nvim_out_write(string.char(api.nvim_call_function("getchar", {}) % 256))'
+          'a.nvim_out_write(string.char(a.nvim_call_function("getchar", {}) % 256))'
       end
-      lines[#lines + 1] = [[api.nvim_out_write "\n>\n"]]
-      lines[#lines + 1] =
-        'memory[i] = api.nvim_call_function("getchar", {}) % 256'
-      lines[#lines + 1] = "api.nvim_out_write(string.char(memory[i]))"
-      lines[#lines + 1] = [[api.nvim_out_write "\n"]]
+      lines[#lines + 1] = [[a.nvim_out_write "\n>\n"]]
+      lines[#lines + 1] = 'm[i] = a.nvim_call_function("getchar", {}) % 256'
+      lines[#lines + 1] = "a.nvim_out_write(string.char(m[i]))"
+      lines[#lines + 1] = [[a.nvim_out_write "\n"]]
     elseif token.type == TOKEN_LOOP_BEGIN then
       if loop_weights[token_i].should_outline then
         lines[#lines + 1] = "local function f" .. token_i .. "()"
       else
-        lines[#lines + 1] = "while memory[i] ~= 0 do"
+        lines[#lines + 1] = "while m[i] ~= 0 do"
       end
     elseif token.type == TOKEN_LOOP_END then
       if breakcheck_interval > 0 then
         -- Break-checking on possible backward braches is good enough.
-        lines[#lines + 1] = "bc("
+        lines[#lines + 1] = "b("
           .. loop_weights[tokens[token_i].begin_token_i].inner_non_loop
           .. ")"
       end
       if loop_weights[token.begin_token_i].should_outline then
         lines[#lines + 1] = "end"
-        lines[#lines + 1] = "while memory[i] ~= 0 do"
+        lines[#lines + 1] = "while m[i] ~= 0 do"
         lines[#lines + 1] = "f" .. token.begin_token_i .. "()"
       end
       lines[#lines + 1] = "end"
     end
   end
 
-  lines[#lines + 1] = [[api.nvim_out_write "\n"]]
+  lines[#lines + 1] = [[a.nvim_out_write "\n"]]
   return lines
 end
 
@@ -459,6 +459,8 @@ function M.source(lines, opts)
 
   if opts.compile and opts.terminal then
     error "Cannot run compiled brainfuck programs in a terminal yet"
+  elseif opts.transpile and opts.terminal then
+    error 'Option "transpile" cannot be used with "terminal"'
   end
 
   local profile
