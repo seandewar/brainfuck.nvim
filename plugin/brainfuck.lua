@@ -8,6 +8,10 @@ api.nvim_create_autocmd("SourceCmd", {
   end,
 })
 
+api.nvim_create_user_command("Brainfuck", function(info)
+  require("brainfuck").source(info.args)
+end, { nargs = 1 })
+
 api.nvim_create_user_command("BrainfuckSource", function(info)
   local opts = { profile = info.bang }
   local file
@@ -41,6 +45,11 @@ api.nvim_create_user_command("BrainfuckSource", function(info)
       opts.transpile = toboolean(value)
       if opts.transpile == nil then
         error 'Option "transpile" needs a boolean value'
+      end
+    elseif option == "terminal" then
+      opts.terminal = toboolean(value)
+      if opts.terminal == nil then
+        error 'Option "terminal" needs a boolean value'
       end
     else
       error('Unknown option: "' .. option .. '"')

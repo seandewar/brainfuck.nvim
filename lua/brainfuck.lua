@@ -90,7 +90,7 @@ function M.parse(lines)
         else -- op == OP_LOOP_END
           if #unresolved_loops == 0 then
             error(
-              ("parse error: unmatched ']' at line %d, col %d"):format(
+              ("Parse error: unmatched ']' at line %d, col %d"):format(
                 line_nr,
                 col_nr
               )
@@ -114,7 +114,7 @@ function M.parse(lines)
   if #unresolved_loops ~= 0 then
     local unresolved = unresolved_loops[#unresolved_loops]
     error(
-      ("parse error: unmatched '[' at line %d, col %d"):format(
+      ("Parse error: unmatched '[' at line %d, col %d"):format(
         unresolved.line_nr,
         unresolved.col_nr
       )
@@ -126,59 +126,190 @@ function M.parse(lines)
   return tokens, contained_loops
 end
 
-function M.interpret(tokens, memory_size, breakcheck_interval)
-  memory_size = memory_size or 30000
-  breakcheck_interval = breakcheck_interval or 1000000
+local NL = ("\n"):byte()
+
+function M.interpret(tokens, opts)
   vim.validate {
     { tokens, "t" },
-    { memory_size, "n" },
-    { breakcheck_interval, "n" },
+    { opts, "t", true },
+  }
+  opts = vim.tbl_extend("keep", opts or {}, {
+    memory_size = 3000,
+    breakcheck_interval = 500000,
+    terminal = true,
+  })
+  vim.validate {
+    { opts.memory_size, "n" },
+    { opts.breakcheck_interval, "n" },
+    { opts.terminal, "b" },
   }
 
   local memory = {}
-  for i = 1, memory_size do
+  for i = 1, opts.memory_size do
     memory[i] = 0
   end
 
   local memory_i = 1
   local token_i = 1
-  local breakcheck_counter = breakcheck_interval
+  local breakcheck_counter = opts.breakcheck_interval
 
-  while token_i <= #tokens do
-    local token = tokens[token_i]
+  -- Returns true if we're not at the end of the tokens tape.
+  local function interpret_until_breakcheck(putc, getc)
+    while token_i <= #tokens do
+      local token = tokens[token_i]
 
-    if token.type == TOKEN_CURSOR_MOVE then
-      memory_i = ((memory_i + token.count - 1) % #memory) + 1
-    elseif token.type == TOKEN_CURSOR_WRITE then
-      memory[memory_i] = (memory[memory_i] + token.count) % 256
-    elseif token.type == TOKEN_PUTC then
-      api.nvim_out_write(string.char(memory[memory_i]):rep(token.count))
-    elseif token.type == TOKEN_GETC then
-      for _ = 1, token.count do
-        api.nvim_out_write "\n>\n"
-        memory[memory_i] = fn.getchar() % 256
-        api.nvim_out_write(string.char(memory[memory_i]))
+      if token.type == TOKEN_CURSOR_MOVE then
+        memory_i = ((memory_i + token.count - 1) % #memory) + 1
+      elseif token.type == TOKEN_CURSOR_WRITE then
+        memory[memory_i] = (memory[memory_i] + token.count) % 256
+      elseif token.type == TOKEN_PUTC then
+        putc(memory[memory_i], token.count)
+      elseif token.type == TOKEN_GETC then
+        local char = getc(token.count)
+        if not char then
+          return true
+        end
+        memory[memory_i] = char
+      elseif token.type == TOKEN_LOOP_BEGIN then
+        if memory[memory_i] == 0 then
+          token_i = token.end_token_i
+        end
+      elseif token.type == TOKEN_LOOP_END then
+        if memory[memory_i] ~= 0 then
+          token_i = token.begin_token_i
+        end
       end
-      api.nvim_out_write "\n"
-    elseif token.type == TOKEN_LOOP_BEGIN then
-      if memory[memory_i] == 0 then
-        token_i = token.end_token_i
-      end
-    elseif token.type == TOKEN_LOOP_END then
-      if memory[memory_i] ~= 0 then
-        token_i = token.begin_token_i
+
+      token_i = token_i + 1
+      breakcheck_counter = breakcheck_counter - 1
+      if breakcheck_counter == 0 then
+        breakcheck_counter = opts.breakcheck_interval
+        return true
       end
     end
 
-    token_i = token_i + 1
-    breakcheck_counter = breakcheck_counter - 1
-    if breakcheck_counter == 0 then
-      fn.getchar(1) -- Peek so <C-c> has a chance to interrupt.
-      breakcheck_counter = breakcheck_interval
-    end
+    return false
   end
 
-  api.nvim_out_write "\n"
+  local function run_terminal()
+    local buf = api.nvim_create_buf(true, true)
+    if buf == 0 then
+      error "Failed to create terminal buffer"
+    end
+
+    local screen_width = vim.o.columns
+    local screen_height = math.max(1, vim.o.lines - vim.o.cmdheight - 1)
+    local width = math.max(1, screen_width - 5)
+    local height = math.max(1, screen_height - 5)
+
+    local win = api.nvim_open_win(buf, true, {
+      relative = "editor",
+      width = width,
+      height = height,
+      col = (screen_width - width) / 2,
+      row = (screen_height - height) / 2,
+      style = "minimal",
+      border = "rounded",
+      title = " Brainfuck (Interpreted) ",
+      title_pos = "center",
+    })
+    if win == 0 then
+      api.nvim_buf_delete(buf, { force = true })
+      error "Failed to create terminal window"
+    end
+
+    api.nvim_set_option_value("bufhidden", "wipe", { buf = buf })
+
+    local continue
+    local input_buf_needed
+    local input_buf = ""
+
+    local chan = api.nvim_open_term(buf, {
+      on_input = function(_, _, _, data)
+        input_buf = input_buf .. data
+
+        if input_buf_needed ~= nil and #input_buf >= input_buf_needed then
+          input_buf_needed = nil
+          vim.schedule(continue)
+        end
+      end,
+    })
+    if chan == 0 then
+      api.nvim_win_close(win, true)
+      error "Failed to create terminal instance"
+    end
+
+    api.nvim_echo(
+      { { [[Press i to send input, CTRL-\ CTRL-N to stop.]] } },
+      false,
+      {}
+    )
+
+    local function putc(char, count)
+      local chars = string.char(char):rep(count)
+      -- Need to send a CR to start at the beginning of the new line.
+      api.nvim_chan_send(chan, char == NL and ("\r" .. chars) or chars)
+    end
+
+    local function getc(count)
+      if #input_buf < count then
+        input_buf_needed = count
+        return nil
+      end
+
+      -- TODO: maybe turn input_buf into a circular buffer instead...
+      local echoed = input_buf:sub(1, count):gsub("\r", "\r\n")
+      local char = input_buf:byte(count)
+      api.nvim_chan_send(chan, echoed)
+      input_buf = input_buf:sub(count + 1)
+      return char
+    end
+
+    continue = function()
+      if not api.nvim_buf_is_loaded(buf) then
+        return
+      end
+
+      if interpret_until_breakcheck(putc, getc) then
+        if input_buf_needed == nil then
+          vim.schedule(continue)
+        end
+      else
+        fn.chanclose(chan)
+      end
+      vim.cmd.redraw() -- nvim_chan_send() might not cause a terminal redraw.
+    end
+
+    continue()
+  end
+
+  local function run_cmdline()
+    local function putc(char, count)
+      api.nvim_out_write(string.char(char):rep(count))
+    end
+
+    local function getc(count)
+      local char
+      for _ = 1, count do
+        api.nvim_out_write "\n>\n"
+        char = fn.getchar() % 256
+        api.nvim_out_write(string.char(char))
+      end
+      api.nvim_out_write "\n"
+      return char
+    end
+
+    while interpret_until_breakcheck(putc, getc) do
+      fn.getchar(1) -- Peek so <C-c> has a chance to interrupt.
+    end
+    api.nvim_out_write "\n" -- May still have an incomplete line buffered.
+  end
+
+  if opts.terminal then
+    run_terminal()
+  else
+    run_cmdline()
+  end
 end
 
 function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
@@ -313,20 +444,26 @@ function M.transpile(tokens, contained_loops, memory_size, breakcheck_interval)
 end
 
 function M.source(lines, opts)
+  vim.validate { { opts, "t", true } }
   opts = vim.tbl_extend("keep", opts or {}, {
     profile = false,
-    compile = true,
+    compile = not opts or not opts.terminal,
     transpile = false,
   })
   vim.validate {
     { opts.profile, "b" },
     { opts.compile, "b" },
     { opts.transpile, "b" },
+    { opts.terminal, "b", true },
   }
 
-  local step
+  if opts.compile and opts.terminal then
+    error "Cannot run compiled brainfuck programs in a terminal yet"
+  end
+
+  local profile
   if opts.profile then
-    step = function(f, action)
+    profile = function(f, action)
       local start_time = uv.hrtime()
       local result = f()
       local end_time = uv.hrtime()
@@ -339,18 +476,18 @@ function M.source(lines, opts)
       return result
     end
   else
-    step = function(f)
+    profile = function(f)
       return f()
     end
   end
 
-  local parsed = step(function()
+  local parsed = profile(function()
     local tokens, contained_loops = M.parse(lines)
     return { tokens = tokens, contained_loops = contained_loops }
   end, "Parsing")
 
   if opts.compile or opts.transpile then
-    local transpiled = step(function()
+    local transpiled = profile(function()
       return M.transpile(
         parsed.tokens,
         parsed.contained_loops,
@@ -364,7 +501,7 @@ function M.source(lines, opts)
     end
 
     if opts.compile then
-      local info = step(function()
+      local info = profile(function()
         local program, err = loadstring(
           table.concat(transpiled, "\n"),
           "compiled brainfuck program"
@@ -374,17 +511,22 @@ function M.source(lines, opts)
       if not info.program then
         error(
           "Lua loadstring() of transpiled program failed!"
-            .. " This is a brainfuck.nvim bug. Details: "
+            .. " This is probably a brainfuck.nvim bug. Details: "
             .. info.err
         )
       end
 
-      step(info.program, "Execution (compiled)")
+      profile(info.program, "Execution (compiled)")
     end
   else
-    step(function()
-      M.interpret(parsed.tokens, opts.memory_size)
-    end, "Execution (interpreted)")
+    if opts.terminal then
+      -- Terminal is non-blocking, so profile() won't work.
+      M.interpret(parsed.tokens, opts)
+    else
+      profile(function()
+        M.interpret(parsed.tokens, opts)
+      end, "Execution (interpreted)")
+    end
   end
 end
 

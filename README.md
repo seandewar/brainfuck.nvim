@@ -31,9 +31,25 @@ Examples:
 
 " Transpile file.bf to Lua without running it. Open the result in a new buffer.
 :BrainfuckSource file.bf compile=false transpile=true
+
+" Source file.bf, but show the output in a floating terminal window.
+" Programs executed this way are non-blocking, and can handle control codes
+" outputted by programs properly.
+"
+" The program will be interpreted, as running compiled brainfuck programs in a
+" terminal buffer is not yet supported.
+:BrainfuckSource file.bf terminal=true
 ```
 
-Brainfuck programs can also be interrupted by pressing `<C-c>`.
+Brainfuck programs can be killed by pressing `<C-c>`, except for those running
+in a terminal window (those can be killed by simply using `:quit`).
+
+Additionally, Brainfuck code can be sourced directly using `:Brainfuck`.
+Example:
+
+```vim
+:Brainfuck +++++++[>++++++++++<-]>++.+.
+```
 
 ## Where can I find some Brainfuck programs?
 
